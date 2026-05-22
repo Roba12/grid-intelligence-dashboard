@@ -128,8 +128,29 @@ export default async function Home() {
     getTrackRecord(),
   ])
 
-  const peakPrice = forecast24h.length > 0
-    ? Math.max(...forecast24h.map(r => r.predicted_price ?? 0))
+  // Hide consecutive runs of identical predicted prices — these are data-lag artifacts
+  // where gas_headroom_mw hasn't published yet and the model outputs the same fallback value.
+  const { visibleForecast, hiddenHourCount } = (() => {
+    const visible: PredictionRow[] = []
+    let hiddenCount = 0
+    let i = 0
+    while (i < forecast24h.length) {
+      const price = forecast24h[i].predicted_price
+      let j = i + 1
+      while (j < forecast24h.length && forecast24h[j].predicted_price === price) j++
+      if (j - i >= 2) {
+        hiddenCount += j - i
+        i = j
+      } else {
+        visible.push(forecast24h[i])
+        i++
+      }
+    }
+    return { visibleForecast: visible, hiddenHourCount: hiddenCount }
+  })()
+
+  const peakPrice = visibleForecast.length > 0
+    ? Math.max(...visibleForecast.map(r => r.predicted_price ?? 0))
     : null
 
   const lastUpdated = alert1h?.predicted_at ?? forecast24h[0]?.predicted_at ?? null
@@ -176,7 +197,7 @@ export default async function Home() {
             </div>
           ) : (
             <div className="bg-[#111111] border border-zinc-800 p-6 text-zinc-600 font-mono text-sm">
-              No 1h prediction available
+              1H Alert: Standby &mdash; awaiting gas headroom data (publishes ~2h after settlement)
             </div>
           )}
         </div>
@@ -191,61 +212,72 @@ export default async function Home() {
               No upcoming 24h predictions found. Run the pipeline to generate tomorrow&apos;s forecast.
             </p>
           ) : (
-            <div className="border border-zinc-800 overflow-x-auto">
-              <table className="w-full text-sm font-mono">
-                <thead>
-                  <tr className="bg-[#0f0f0f] border-b border-zinc-800">
-                    <th className="text-left text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                      Hour (MPT)
-                    </th>
-                    <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                      Predicted Price
-                    </th>
-                    <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                      Spike Probability
-                    </th>
-                    <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                      Alert
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {forecast24h.map((row, i) => {
-                    const price  = row.predicted_price ?? 0
-                    const spike  = row.spike_probability ?? 0
-                    const isPeak = price === peakPrice
-                    const rowBg  = isPeak
-                      ? 'border-l-2 border-yellow-600/50 bg-yellow-950/20'
-                      : i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#111111]'
+            <>
+              {hiddenHourCount > 0 && (
+                <p className="text-zinc-600 font-mono text-xs mb-2">
+                  Earlier hours pending data publication ({hiddenHourCount} hour{hiddenHourCount !== 1 ? 's' : ''} hidden)
+                </p>
+              )}
+              <div className="border border-zinc-800 overflow-x-auto">
+                <table className="w-full text-sm font-mono">
+                  <thead>
+                    <tr className="bg-[#0f0f0f] border-b border-zinc-800">
+                      <th className="text-left text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
+                        Hour (MPT)
+                      </th>
+                      <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
+                        Predicted Price
+                      </th>
+                      <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
+                        Spike Probability
+                      </th>
+                      <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
+                        Alert
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleForecast.map((row, i) => {
+                      const price  = row.predicted_price ?? 0
+                      const spike  = row.spike_probability ?? 0
+                      const isPeak = price === peakPrice
+                      const rowBg  = isPeak
+                        ? 'border-l-2 border-yellow-600/50 bg-yellow-950/20'
+                        : i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#111111]'
 
-                    return (
-                      <tr key={row.id} className={rowBg}>
-                        <td className="px-4 py-2.5 text-zinc-300 whitespace-nowrap">
-                          {fmtHour12(row.target_hour)}
-                        </td>
-                        <td className={`px-4 py-2.5 text-right whitespace-nowrap font-semibold ${isPeak ? 'text-yellow-300' : 'text-white'}`}>
-                          ${price.toFixed(2)}
-                        </td>
-                        <td className="px-3 py-1.5 text-center whitespace-nowrap">
-                          <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-sm ${spikeCellClass(spike)}`}>
-                            {(spike * 100).toFixed(1)}%
-                          </span>
-                        </td>
-                        <td className="px-4 py-2.5 text-center whitespace-nowrap text-xs">
-                          {spike >= SPIKE_ALERT ? (
-                            <span className="text-red-400 font-semibold">&#9889; SPIKE</span>
-                          ) : spike >= SPIKE_WATCH ? (
-                            <span className="text-yellow-500">watch</span>
-                          ) : (
-                            <span className="text-zinc-700">&mdash;</span>
-                          )}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
+                      return (
+                        <tr key={row.id} className={rowBg}>
+                          <td className="px-4 py-2.5 text-zinc-300 whitespace-nowrap">
+                            {fmtHour12(row.target_hour)}
+                          </td>
+                          <td className={`px-4 py-2.5 text-right whitespace-nowrap font-semibold ${isPeak ? 'text-yellow-300' : 'text-white'}`}>
+                            ${price.toFixed(2)}
+                          </td>
+                          <td className="px-3 py-1.5 text-center whitespace-nowrap">
+                            {spike >= 0.15 ? (
+                              <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-sm ${spikeCellClass(spike)}`}>
+                                {(spike * 100).toFixed(1)}%
+                              </span>
+                            ) : (
+                              <span className="text-zinc-700">&mdash;</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2.5 text-center whitespace-nowrap text-xs">
+                            {spike >= SPIKE_ALERT ? (
+                              <span className="text-red-400 font-semibold">&#9889; SPIKE</span>
+                            ) : spike >= SPIKE_WATCH ? (
+                              <span className="text-yellow-500">watch</span>
+                            ) : (
+                              <span className="text-zinc-700">&mdash;</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
 
