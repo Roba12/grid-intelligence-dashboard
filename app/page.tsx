@@ -3,37 +3,46 @@ import { PredictionRow } from '@/app/lib/types'
 
 export const dynamic = 'force-dynamic'
 
-const MPT         = 'America/Edmonton'
-const SPIKE_ALERT = 0.60
-const SPIKE_WATCH = 0.20
-const SPIKE_PRICE = 100
-const PROVISIONAL = 5
+const MPT = 'America/Edmonton'
+
+// ── Date helpers ──────────────────────────────────────────────────────────────
+
+function mptDayBounds(): { start: string; end: string } {
+  const now = new Date()
+  const todayMPT = new Intl.DateTimeFormat('en-CA', {
+    timeZone: MPT, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now)
+  // Verify offset: try MDT (UTC-6), fall back to MST (UTC-7)
+  const midnightMDT = new Date(`${todayMPT}T00:00:00-06:00`)
+  const checkMDT = new Intl.DateTimeFormat('en-CA', { timeZone: MPT }).format(midnightMDT)
+  const start = checkMDT === todayMPT ? midnightMDT : new Date(`${todayMPT}T00:00:00-07:00`)
+  const end   = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+  return { start: start.toISOString(), end: end.toISOString() }
+}
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 
-function fmtHour12(iso: string): string {
+function fmtHourMPT(iso: string): string {
   return new Intl.DateTimeFormat('en-US', {
-    timeZone: MPT, hour: 'numeric', minute: '2-digit', hour12: true,
+    timeZone: MPT, hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(new Date(iso))
 }
 
-function fmtCardHour(iso: string): string {
+function fmtDateHourMPT(iso: string): string {
   const d = new Date(iso)
-  d.setMinutes(0, 0, 0)
   const date = new Intl.DateTimeFormat('en-US', {
-    timeZone: MPT, month: 'long', day: 'numeric', year: 'numeric',
+    timeZone: MPT, month: 'short', day: 'numeric',
   }).format(d)
   const time = new Intl.DateTimeFormat('en-US', {
     timeZone: MPT, hour: '2-digit', minute: '2-digit', hour12: false,
   }).format(d)
-  return `${date} — ${time} MPT`
+  return `${date} ${time}`
 }
 
-function fmtTableHour(iso: string): string {
+function fmtTargetFull(iso: string): string {
   const d = new Date(iso)
-  d.setMinutes(0, 0, 0)
   const date = new Intl.DateTimeFormat('en-US', {
-    timeZone: MPT, month: 'short', day: 'numeric',
+    timeZone: MPT, weekday: 'short', month: 'short', day: 'numeric',
   }).format(d)
   const time = new Intl.DateTimeFormat('en-US', {
     timeZone: MPT, hour: '2-digit', minute: '2-digit', hour12: false,
@@ -42,34 +51,10 @@ function fmtTableHour(iso: string): string {
 }
 
 function fmtUpdated(iso: string): string {
-  const d = new Date(iso)
   return new Intl.DateTimeFormat('en-US', {
     timeZone: MPT, month: 'short', day: 'numeric', year: 'numeric',
     hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(d) + ' MPT'
-}
-
-// ── Spike helpers ─────────────────────────────────────────────────────────────
-
-function spikeCellClass(prob: number): string {
-  if (prob >= SPIKE_ALERT) return 'bg-red-900/30 text-red-400'
-  if (prob >= SPIKE_WATCH) return 'bg-yellow-900/30 text-yellow-300'
-  return 'bg-green-900/20 text-green-400'
-}
-
-function spikeCardColor(prob: number): string {
-  if (prob >= SPIKE_ALERT) return 'text-red-400'
-  if (prob >= SPIKE_WATCH) return 'text-yellow-400'
-  return 'text-green-400'
-}
-
-function spikeFlag(prob: number, actual: number | null): { symbol: string; color: string } {
-  if (actual === null)      return { symbol: '—', color: 'text-zinc-600' }
-  if (actual < PROVISIONAL) return { symbol: '?',  color: 'text-zinc-500' }
-  const correct = (prob > SPIKE_ALERT) === (actual > SPIKE_PRICE)
-  return correct
-    ? { symbol: '✓', color: 'text-green-400' }
-    : { symbol: '✗', color: 'text-red-400' }
+  }).format(new Date(iso)) + ' MPT'
 }
 
 // ── Data fetches ──────────────────────────────────────────────────────────────
@@ -86,26 +71,28 @@ async function get1hAlert(): Promise<PredictionRow | null> {
 }
 
 async function get24hForecast(): Promise<PredictionRow[]> {
+  const { start, end } = mptDayBounds()
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
     .select('id, target_hour, predicted_price, spike_probability')
     .eq('forecast_type', '24h')
-    .gte('target_hour', new Date().toISOString())
+    .gte('target_hour', start)
+    .lt('target_hour', end)
     .order('target_hour', { ascending: true })
   if (error) throw new Error(error.message)
   return (data ?? []) as unknown as PredictionRow[]
 }
 
-async function getTrackRecord(): Promise<PredictionRow[]> {
+async function getRecentAccuracy(): Promise<PredictionRow[]> {
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
-    .select('id, predicted_at, target_hour, predicted_price, spike_probability, actual_price')
+    .select('id, target_hour, predicted_price, spike_probability, actual_price')
     .eq('forecast_type', '24h')
-    .lt('target_hour', new Date().toISOString())
+    .not('actual_price', 'is', null)
     .order('target_hour', { ascending: false })
-    .order('predicted_at', { ascending: false })
-    .limit(50)
+    .limit(48)
   if (error) throw new Error(error.message)
+  // Deduplicate: keep most recent prediction for each target_hour
   const all = (data ?? []) as unknown as PredictionRow[]
   const seen = new Set<string>()
   const out: PredictionRow[] = []
@@ -114,162 +101,170 @@ async function getTrackRecord(): Promise<PredictionRow[]> {
       seen.add(row.target_hour)
       out.push(row)
     }
-    if (out.length === 7) break
   }
   return out
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+
+function alertBand(prob: number | null): {
+  bg: string; border: string; label: string; labelColor: string; icon: string
+} {
+  if (prob === null)   return { bg: 'bg-zinc-900',   border: 'border-zinc-700', label: 'STANDBY',        labelColor: 'text-zinc-400', icon: '◌' }
+  if (prob > 0.60)    return { bg: 'bg-red-950',     border: 'border-red-700',  label: 'SPIKE ALERT',    labelColor: 'text-red-400',  icon: '⚡' }
+  if (prob > 0.30)    return { bg: 'bg-yellow-950',  border: 'border-yellow-700', label: 'ELEVATED RISK', labelColor: 'text-yellow-400', icon: '⚠' }
+  return               { bg: 'bg-green-950',    border: 'border-green-800', label: 'MARKET NORMAL',  labelColor: 'text-green-400', icon: '✓' }
+}
+
+function riskLabel(prob: number): { text: string; cls: string } {
+  if (prob > 0.60) return { text: 'Alert', cls: 'text-red-400 font-semibold' }
+  if (prob > 0.15) return { text: 'Watch', cls: 'text-yellow-400' }
+  return               { text: '',      cls: '' }
+}
+
+function accuracyResult(absError: number): { symbol: string; cls: string } {
+  if (absError < 30) return { symbol: '✓', cls: 'text-green-400' }
+  if (absError < 60) return { symbol: '~', cls: 'text-yellow-400' }
+  return                { symbol: '✗', cls: 'text-red-400' }
+}
+
+function dedupeForecast(rows: PredictionRow[]): { visible: PredictionRow[]; hidden: number } {
+  const visible: PredictionRow[] = []
+  let hidden = 0
+  let i = 0
+  while (i < rows.length) {
+    const price = rows[i].predicted_price
+    let j = i + 1
+    while (j < rows.length && rows[j].predicted_price === price) j++
+    if (j - i >= 2) { hidden += j - i; i = j }
+    else { visible.push(rows[i]); i++ }
+  }
+  return { visible, hidden }
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function Home() {
-  const [alert1h, forecast24h, trackRecord] = await Promise.all([
+  const [alert1h, forecast24h, recentRows] = await Promise.all([
     get1hAlert(),
     get24hForecast(),
-    getTrackRecord(),
+    getRecentAccuracy(),
   ])
 
-  // Hide consecutive runs of identical predicted prices — these are data-lag artifacts
-  // where gas_headroom_mw hasn't published yet and the model outputs the same fallback value.
-  const { visibleForecast, hiddenHourCount } = (() => {
-    const visible: PredictionRow[] = []
-    let hiddenCount = 0
-    let i = 0
-    while (i < forecast24h.length) {
-      const price = forecast24h[i].predicted_price
-      let j = i + 1
-      while (j < forecast24h.length && forecast24h[j].predicted_price === price) j++
-      if (j - i >= 2) {
-        hiddenCount += j - i
-        i = j
-      } else {
-        visible.push(forecast24h[i])
-        i++
-      }
-    }
-    return { visibleForecast: visible, hiddenHourCount: hiddenCount }
-  })()
+  const { visible: forecast, hidden: hiddenCount } = dedupeForecast(forecast24h)
 
-  const peakPrice = visibleForecast.length > 0
-    ? Math.max(...visibleForecast.map(r => r.predicted_price ?? 0))
+  const prob1h  = alert1h?.spike_prob_1h  ?? null
+  const price1h = alert1h?.predicted_price_1h ?? null
+  const band    = alertBand(price1h !== null ? prob1h : null)
+
+  const mae = recentRows.length > 0
+    ? recentRows.reduce((sum, r) => sum + Math.abs((r.predicted_price ?? 0) - (r.actual_price ?? 0)), 0) / recentRows.length
     : null
 
   const lastUpdated = alert1h?.predicted_at ?? forecast24h[0]?.predicted_at ?? null
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-gray-200">
-      <div className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+    <div className="min-h-screen bg-[#0a0a0a] text-gray-200 font-mono">
+      <div className="max-w-3xl mx-auto px-4 py-8 space-y-8">
 
-        {/* Header */}
-        <div className="border-b border-zinc-800 pb-6">
-          <h1 className="text-2xl font-bold text-white tracking-tight">
+        {/* ── Header ── */}
+        <div className="border-b border-zinc-800 pb-5">
+          <h1 className="text-xl font-bold text-white tracking-tight">
             Alberta Grid Intelligence
           </h1>
-          <p className="text-zinc-500 text-sm mt-1">
-            Real-time price forecast &mdash; AESO pool price
+          <p className="text-zinc-500 text-xs mt-1">
+            AESO pool price forecast &mdash; LightGBM regime model
           </p>
-          {lastUpdated && (
-            <p className="text-zinc-600 text-xs mt-2 font-mono">
-              Last updated: {fmtUpdated(lastUpdated)}
-            </p>
-          )}
         </div>
 
-        {/* 1H Alert card */}
-        <div>
-          <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-3">
-            1H Alert
-          </p>
-          {alert1h?.predicted_price_1h != null ? (
-            <div className="bg-[#111111] border border-zinc-800 p-6">
-              <div className="text-zinc-400 text-sm mb-4 font-mono">
-                {fmtCardHour(alert1h.target_hour)}
-              </div>
-              <div className="font-mono font-bold text-white mb-4 leading-none">
-                <span className="text-5xl">${alert1h.predicted_price_1h.toFixed(2)}</span>
-                <span className="text-lg text-zinc-500 ml-2">/MWh</span>
-              </div>
-              <div className={`text-sm font-mono font-semibold ${spikeCardColor(alert1h.spike_prob_1h ?? 0)}`}>
-                Spike prob: {((alert1h.spike_prob_1h ?? 0) * 100).toFixed(1)}%
-                {(alert1h.spike_prob_1h ?? 0) >= SPIKE_ALERT && (
-                  <span className="ml-2">&#9889; SPIKE ALERT</span>
+        {/* ── SECTION 1: 1H ALERT ── */}
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <p className="text-xs text-zinc-500 uppercase tracking-widest">1H Alert</p>
+            <p className="text-xs text-zinc-600">Live signal &mdash; updates hourly</p>
+          </div>
+
+          <div className={`${band.bg} border ${band.border} p-5 rounded-sm`}>
+            {price1h !== null ? (
+              <div className="space-y-3">
+                <div className={`text-lg font-bold ${band.labelColor} tracking-wide`}>
+                  {band.icon} {band.label}
+                </div>
+                <div className="flex flex-wrap items-end gap-4">
+                  <div>
+                    <span className="text-4xl font-bold text-white">${price1h.toFixed(2)}</span>
+                    <span className="text-zinc-500 text-sm ml-1">/MWh</span>
+                  </div>
+                  {prob1h !== null && (
+                    <div className={`text-sm ${band.labelColor}`}>
+                      Spike prob: {(prob1h * 100).toFixed(1)}%
+                    </div>
+                  )}
+                </div>
+                {alert1h?.target_hour && (
+                  <div className="text-xs text-zinc-500">
+                    Target: {fmtTargetFull(alert1h.target_hour)}
+                  </div>
                 )}
               </div>
-            </div>
-          ) : (
-            <div className="bg-[#111111] border border-zinc-800 p-6 text-zinc-600 font-mono text-sm">
-              1H Alert: Standby &mdash; awaiting gas headroom data (publishes ~2h after settlement)
-            </div>
-          )}
-        </div>
+            ) : (
+              <div className="space-y-1">
+                <div className="text-sm text-zinc-400">◌ Standby</div>
+                <div className="text-xs text-zinc-500">
+                  Awaiting gas headroom data &mdash; publishes ~2h after settlement
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
 
-        {/* 24H Forecast table */}
-        <div>
-          <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-3">
-            24H Forecast &mdash; Tomorrow (MPT)
-          </p>
-          {forecast24h.length === 0 ? (
-            <p className="text-zinc-600 font-mono text-sm">
-              No upcoming 24h predictions found. Run the pipeline to generate tomorrow&apos;s forecast.
+        {/* ── SECTION 2: TODAY'S FORECAST ── */}
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <p className="text-xs text-zinc-500 uppercase tracking-widest">
+              Today&apos;s Forecast
             </p>
+            <p className="text-xs text-zinc-600">Made at 8am MST &mdash; full day forecast</p>
+          </div>
+
+          {forecast.length === 0 ? (
+            <div className="border border-zinc-800 p-4 text-zinc-600 text-sm">
+              No forecast for today. Run the pipeline to generate predictions.
+            </div>
           ) : (
             <>
-              {hiddenHourCount > 0 && (
-                <p className="text-zinc-600 font-mono text-xs mb-2">
-                  Earlier hours pending data publication ({hiddenHourCount} hour{hiddenHourCount !== 1 ? 's' : ''} hidden)
+              {hiddenCount > 0 && (
+                <p className="text-zinc-700 text-xs mb-2">
+                  {hiddenCount} hour{hiddenCount !== 1 ? 's' : ''} hidden (data publication pending)
                 </p>
               )}
-              <div className="border border-zinc-800 overflow-x-auto">
-                <table className="w-full text-sm font-mono">
+              <div className="border border-zinc-800 overflow-x-auto rounded-sm">
+                <table className="w-full text-sm">
                   <thead>
-                    <tr className="bg-[#0f0f0f] border-b border-zinc-800">
-                      <th className="text-left text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                        Hour (MPT)
-                      </th>
-                      <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                        Predicted Price
-                      </th>
-                      <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                        Spike Probability
-                      </th>
-                      <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">
-                        Alert
-                      </th>
+                    <tr className="bg-[#111] border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
+                      <th className="text-left px-4 py-2.5 font-medium whitespace-nowrap">Hour (MPT)</th>
+                      <th className="text-right px-4 py-2.5 font-medium whitespace-nowrap">Predicted Price</th>
+                      <th className="text-center px-4 py-2.5 font-medium whitespace-nowrap">Risk</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleForecast.map((row, i) => {
-                      const price  = row.predicted_price ?? 0
-                      const spike  = row.spike_probability ?? 0
-                      const isPeak = price === peakPrice
-                      const rowBg  = isPeak
-                        ? 'border-l-2 border-yellow-600/50 bg-yellow-950/20'
-                        : i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#111111]'
-
+                    {forecast.map((row, i) => {
+                      const price = row.predicted_price ?? 0
+                      const prob  = row.spike_probability ?? 0
+                      const risk  = riskLabel(prob)
                       return (
-                        <tr key={row.id} className={rowBg}>
+                        <tr
+                          key={row.id}
+                          className={`border-b border-zinc-900 ${i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
+                        >
                           <td className="px-4 py-2.5 text-zinc-300 whitespace-nowrap">
-                            {fmtHour12(row.target_hour)}
+                            {fmtHourMPT(row.target_hour)}
                           </td>
-                          <td className={`px-4 py-2.5 text-right whitespace-nowrap font-semibold ${isPeak ? 'text-yellow-300' : 'text-white'}`}>
+                          <td className="px-4 py-2.5 text-right text-white font-semibold whitespace-nowrap">
                             ${price.toFixed(2)}
                           </td>
-                          <td className="px-3 py-1.5 text-center whitespace-nowrap">
-                            {spike >= 0.15 ? (
-                              <span className={`inline-block px-2.5 py-0.5 text-xs font-semibold rounded-sm ${spikeCellClass(spike)}`}>
-                                {(spike * 100).toFixed(1)}%
-                              </span>
-                            ) : (
-                              <span className="text-zinc-700">&mdash;</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-2.5 text-center whitespace-nowrap text-xs">
-                            {spike >= SPIKE_ALERT ? (
-                              <span className="text-red-400 font-semibold">&#9889; SPIKE</span>
-                            ) : spike >= SPIKE_WATCH ? (
-                              <span className="text-yellow-500">watch</span>
-                            ) : (
-                              <span className="text-zinc-700">&mdash;</span>
-                            )}
+                          <td className={`px-4 py-2.5 text-center whitespace-nowrap text-xs ${risk.cls}`}>
+                            {risk.text || <span className="text-zinc-800">&mdash;</span>}
                           </td>
                         </tr>
                       )
@@ -279,74 +274,92 @@ export default async function Home() {
               </div>
             </>
           )}
-        </div>
+        </section>
 
-        {/* Track Record */}
-        <div>
-          <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-3">
-            Recent Track Record
-          </p>
-          {trackRecord.length === 0 ? (
-            <p className="text-zinc-600 font-mono text-sm">No past predictions available yet.</p>
-          ) : (
-            <>
-              <div className="border border-zinc-800 overflow-x-auto">
-                <table className="w-full text-sm font-mono">
-                  <thead>
-                    <tr className="bg-[#0f0f0f] border-b border-zinc-800">
-                      <th className="text-left text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">Target Hour</th>
-                      <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">Predicted</th>
-                      <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">Actual</th>
-                      <th className="text-right text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">Error</th>
-                      <th className="text-center text-zinc-500 px-4 py-3 text-xs uppercase tracking-wider font-medium whitespace-nowrap">Spike Flag</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trackRecord.map((row, i) => {
-                      const flag  = spikeFlag(row.spike_probability ?? 0, row.actual_price ?? null)
-                      const error = row.actual_price !== null && row.actual_price !== undefined
-                        ? (row.predicted_price ?? 0) - row.actual_price
-                        : null
-                      return (
-                        <tr key={row.id} className={i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#111111]'}>
-                          <td className="px-4 py-3 text-zinc-300 whitespace-nowrap">{fmtTableHour(row.target_hour)}</td>
-                          <td className="px-4 py-3 text-right text-white whitespace-nowrap">${(row.predicted_price ?? 0).toFixed(2)}</td>
-                          <td className="px-4 py-3 text-right whitespace-nowrap">
-                            {row.actual_price != null
-                              ? <span className={row.actual_price < PROVISIONAL ? 'text-zinc-500' : 'text-zinc-300'}>${row.actual_price.toFixed(2)}</span>
-                              : <span className="text-zinc-600">Pending</span>
-                            }
-                          </td>
-                          <td className="px-4 py-3 text-right whitespace-nowrap">
-                            {error !== null
-                              ? <span className={error > 0 ? 'text-red-400' : error < 0 ? 'text-green-400' : 'text-zinc-400'}>
-                                  {error >= 0 ? '+' : ''}{error.toFixed(2)}
-                                </span>
-                              : <span className="text-zinc-600">&mdash;</span>
-                            }
-                          </td>
-                          <td className="px-4 py-3 text-center">
-                            <span className={flag.color}>{flag.symbol}</span>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <p className="text-zinc-700 text-xs font-mono mt-2">
-                * Actual prices below ${PROVISIONAL} may be provisional AESO values
+        {/* ── SECTION 3: RECENT ACCURACY ── */}
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <p className="text-xs text-zinc-500 uppercase tracking-widest">Recent Accuracy</p>
+            {mae !== null && (
+              <p className="text-xs text-zinc-500">
+                MAE: <span className="text-white">${mae.toFixed(2)}</span>
+                <span className="text-zinc-600"> / MWh ({recentRows.length} hrs)</span>
               </p>
-            </>
-          )}
-        </div>
+            )}
+          </div>
 
-        {/* Footer */}
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-zinc-600 text-xs font-mono">
-            Data source: AESO public API | Model: LightGBM | Updated daily
-          </p>
-        </div>
+          {recentRows.length === 0 ? (
+            <div className="border border-zinc-800 p-4 text-zinc-600 text-sm">
+              No settled actuals yet.
+            </div>
+          ) : (
+            <div className="border border-zinc-800 overflow-x-auto rounded-sm">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-[#111] border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
+                    <th className="text-left px-4 py-2.5 font-medium whitespace-nowrap">Date / Hour</th>
+                    <th className="text-right px-4 py-2.5 font-medium whitespace-nowrap">Predicted</th>
+                    <th className="text-right px-4 py-2.5 font-medium whitespace-nowrap">Actual</th>
+                    <th className="text-right px-4 py-2.5 font-medium whitespace-nowrap">Error</th>
+                    <th className="text-center px-4 py-2.5 font-medium whitespace-nowrap">Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentRows.map((row, i) => {
+                    const pred  = row.predicted_price ?? 0
+                    const actual = row.actual_price ?? 0
+                    const err   = pred - actual
+                    const abs   = Math.abs(err)
+                    const res   = accuracyResult(abs)
+                    return (
+                      <tr
+                        key={row.id}
+                        className={`border-b border-zinc-900 ${i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
+                      >
+                        <td className="px-4 py-2.5 text-zinc-400 whitespace-nowrap text-xs">
+                          {fmtDateHourMPT(row.target_hour)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-zinc-300 whitespace-nowrap">
+                          ${pred.toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-white whitespace-nowrap">
+                          ${actual.toFixed(2)}
+                        </td>
+                        <td className={`px-4 py-2.5 text-right whitespace-nowrap ${err > 0 ? 'text-red-400' : err < 0 ? 'text-green-400' : 'text-zinc-400'}`}>
+                          {err >= 0 ? '+' : ''}{err.toFixed(2)}
+                        </td>
+                        <td className={`px-4 py-2.5 text-center font-semibold ${res.cls}`}>
+                          {res.symbol}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* ── SECTION 4: SYSTEM STATUS ── */}
+        <section className="border-t border-zinc-800 pt-5 space-y-1">
+          <p className="text-xs text-zinc-500 uppercase tracking-widest mb-3">System Status</p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
+              <div className="text-zinc-600 mb-1">Last updated</div>
+              <div className="text-zinc-300">
+                {lastUpdated ? fmtUpdated(lastUpdated) : '—'}
+              </div>
+            </div>
+            <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
+              <div className="text-zinc-600 mb-1">Next update</div>
+              <div className="text-zinc-300">Daily 8:00 AM MST</div>
+            </div>
+            <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
+              <div className="text-zinc-600 mb-1">Data source</div>
+              <div className="text-zinc-300">AESO public API</div>
+            </div>
+          </div>
+        </section>
 
       </div>
     </div>
