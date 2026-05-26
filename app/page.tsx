@@ -128,18 +128,8 @@ function accuracyResult(absError: number): { symbol: string; cls: string } {
   return                { symbol: '✗', cls: 'text-red-400' }
 }
 
-function dedupeForecast(rows: PredictionRow[]): { visible: PredictionRow[]; hidden: number } {
-  const visible: PredictionRow[] = []
-  let hidden = 0
-  let i = 0
-  while (i < rows.length) {
-    const price = rows[i].predicted_price
-    let j = i + 1
-    while (j < rows.length && rows[j].predicted_price === price) j++
-    if (j - i >= 2) { hidden += j - i; i = j }
-    else { visible.push(rows[i]); i++ }
-  }
-  return { visible, hidden }
+function missingHours(rows: PredictionRow[]): number {
+  return Math.max(0, 24 - rows.length)
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────────
@@ -151,7 +141,7 @@ export default async function Home() {
     getRecentAccuracy(),
   ])
 
-  const { visible: forecast, hidden: hiddenCount } = dedupeForecast(forecast24h)
+  const hiddenCount = missingHours(forecast24h)
 
   const prob1h  = alert1h?.spike_prob_1h  ?? null
   const price1h = alert1h?.predicted_price_1h ?? null
@@ -224,10 +214,10 @@ export default async function Home() {
             <p className="text-xs text-zinc-500 uppercase tracking-widest">
               Today&apos;s Forecast
             </p>
-            <p className="text-xs text-zinc-600">Made at 8am MST &mdash; full day forecast</p>
+            <p className="text-xs text-zinc-600">Made at 1:00 AM MST &mdash; full day forecast</p>
           </div>
 
-          {forecast.length === 0 ? (
+          {forecast24h.length === 0 ? (
             <div className="border border-zinc-800 p-4 text-zinc-600 text-sm">
               No forecast for today. Run the pipeline to generate predictions.
             </div>
@@ -235,7 +225,7 @@ export default async function Home() {
             <>
               {hiddenCount > 0 && (
                 <p className="text-zinc-700 text-xs mb-2">
-                  {hiddenCount} hour{hiddenCount !== 1 ? 's' : ''} hidden (data publication pending)
+                  {hiddenCount} hour{hiddenCount !== 1 ? 's' : ''} missing (data not yet published)
                 </p>
               )}
               <div className="border border-zinc-800 overflow-x-auto rounded-sm">
@@ -248,7 +238,7 @@ export default async function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {forecast.map((row, i) => {
+                    {forecast24h.map((row, i) => {
                       const price = row.predicted_price ?? 0
                       const prob  = row.spike_probability ?? 0
                       const risk  = riskLabel(prob)
@@ -352,7 +342,7 @@ export default async function Home() {
             </div>
             <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
               <div className="text-zinc-600 mb-1">Next update</div>
-              <div className="text-zinc-300">Daily 8:00 AM MST</div>
+              <div className="text-zinc-300">Daily 1:00 AM MST</div>
             </div>
             <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
               <div className="text-zinc-600 mb-1">Data source</div>
