@@ -74,7 +74,7 @@ async function get24hForecast(): Promise<PredictionRow[]> {
   const { start, end } = mptDayBounds()
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
-    .select('id, target_hour, predicted_price, spike_probability')
+    .select('id, target_hour, predicted_price, q10, q25, q50, q75, q90, q99, spread')
     .eq('forecast_type', '24h')
     .gte('target_hour', start)
     .lt('target_hour', end)
@@ -148,7 +148,7 @@ export default async function Home() {
   const band    = alertBand(price1h !== null ? prob1h : null)
 
   const mae = recentRows.length > 0
-    ? recentRows.reduce((sum, r) => sum + Math.abs((r.predicted_price ?? 0) - (r.actual_price ?? 0)), 0) / recentRows.length
+    ? recentRows.reduce((sum, r) => sum + Math.abs(((r.q50 ?? r.predicted_price) ?? 0) - (r.actual_price ?? 0)), 0) / recentRows.length
     : null
 
   const lastUpdated = alert1h?.predicted_at ?? forecast24h[0]?.predicted_at ?? null
@@ -163,7 +163,7 @@ export default async function Home() {
             Alberta Grid Intelligence
           </h1>
           <p className="text-zinc-500 text-xs mt-1">
-            AESO pool price forecast &mdash; LightGBM regime model
+            AESO pool price forecast &mdash; probabilistic quantile model (Q10/Q50/Q90/Q99)
           </p>
         </div>
 
@@ -233,28 +233,50 @@ export default async function Home() {
                   <thead>
                     <tr className="bg-[#111] border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
                       <th className="text-left px-4 py-2.5 font-medium whitespace-nowrap">Hour (MPT)</th>
-                      <th className="text-right px-4 py-2.5 font-medium whitespace-nowrap">Predicted Price</th>
-                      <th className="text-center px-4 py-2.5 font-medium whitespace-nowrap">Risk</th>
+                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q10</th>
+                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q50</th>
+                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q90</th>
+                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q99</th>
+                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Spread</th>
+                      <th className="text-center px-3 py-2.5 font-medium whitespace-nowrap">Flag</th>
                     </tr>
                   </thead>
                   <tbody>
                     {forecast24h.map((row, i) => {
-                      const price = row.predicted_price ?? 0
-                      const prob  = row.spike_probability ?? 0
-                      const risk  = riskLabel(prob)
+                      const q10    = row.q10 ?? row.predicted_price ?? 0
+                      const q50    = row.q50 ?? row.predicted_price ?? 0
+                      const q90    = row.q90 ?? 0
+                      const q99    = row.q99 ?? 0
+                      const spread = row.spread ?? (q90 - q10)
+                      const tail   = q99 > 200
                       return (
                         <tr
                           key={row.id}
-                          className={`border-b border-zinc-900 ${i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
+                          className={`border-b border-zinc-900 ${tail ? 'bg-red-950/20' : i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
                         >
                           <td className="px-4 py-2.5 text-zinc-300 whitespace-nowrap">
                             {fmtHourMPT(row.target_hour)}
                           </td>
-                          <td className="px-4 py-2.5 text-right text-white font-semibold whitespace-nowrap">
-                            ${price.toFixed(2)}
+                          <td className="px-3 py-2.5 text-right text-zinc-500 whitespace-nowrap text-xs">
+                            ${q10.toFixed(0)}
                           </td>
-                          <td className={`px-4 py-2.5 text-center whitespace-nowrap text-xs ${risk.cls}`}>
-                            {risk.text || <span className="text-zinc-800">&mdash;</span>}
+                          <td className="px-3 py-2.5 text-right text-white font-semibold whitespace-nowrap">
+                            ${q50.toFixed(0)}
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-zinc-300 whitespace-nowrap">
+                            ${q90.toFixed(0)}
+                          </td>
+                          <td className={`px-3 py-2.5 text-right whitespace-nowrap font-semibold ${tail ? 'text-red-400' : 'text-zinc-400'}`}>
+                            ${q99.toFixed(0)}
+                          </td>
+                          <td className="px-3 py-2.5 text-right text-zinc-600 whitespace-nowrap text-xs">
+                            ${spread.toFixed(0)}
+                          </td>
+                          <td className="px-3 py-2.5 text-center whitespace-nowrap text-xs">
+                            {tail
+                              ? <span className="text-red-400 font-semibold">TAIL RISK</span>
+                              : <span className="text-zinc-800">&mdash;</span>
+                            }
                           </td>
                         </tr>
                       )
