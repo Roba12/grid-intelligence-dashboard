@@ -248,7 +248,7 @@ export default async function Home() {
                       const q90    = row.q90 ?? 0
                       const q99    = row.q99 ?? 0
                       const spread = row.spread ?? (q90 - q10)
-                      const tail   = q99 > 200
+                      const tail   = q99 > 400
                       return (
                         <tr
                           key={row.id}
