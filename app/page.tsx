@@ -12,7 +12,6 @@ function mptDayBounds(): { start: string; end: string } {
   const todayMPT = new Intl.DateTimeFormat('en-CA', {
     timeZone: MPT, year: 'numeric', month: '2-digit', day: '2-digit',
   }).format(now)
-  // Verify offset: try MDT (UTC-6), fall back to MST (UTC-7)
   const midnightMDT = new Date(`${todayMPT}T00:00:00-06:00`)
   const checkMDT = new Intl.DateTimeFormat('en-CA', { timeZone: MPT }).format(midnightMDT)
   const start = checkMDT === todayMPT ? midnightMDT : new Date(`${todayMPT}T00:00:00-07:00`)
@@ -86,13 +85,12 @@ async function get24hForecast(): Promise<PredictionRow[]> {
 async function getRecentAccuracy(): Promise<PredictionRow[]> {
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
-    .select('id, target_hour, predicted_price, spike_probability, actual_price')
+    .select('id, target_hour, predicted_price, q50, spike_probability, actual_price')
     .eq('forecast_type', '24h')
     .not('actual_price', 'is', null)
     .order('target_hour', { ascending: false })
     .limit(48)
   if (error) throw new Error(error.message)
-  // Deduplicate: keep most recent prediction for each target_hour
   const all = (data ?? []) as unknown as PredictionRow[]
   const seen = new Set<string>()
   const out: PredictionRow[] = []
@@ -110,22 +108,46 @@ async function getRecentAccuracy(): Promise<PredictionRow[]> {
 function alertBand(prob: number | null): {
   bg: string; border: string; label: string; labelColor: string; icon: string
 } {
-  if (prob === null)   return { bg: 'bg-zinc-900',   border: 'border-zinc-700', label: 'STANDBY',        labelColor: 'text-zinc-400', icon: '◌' }
-  if (prob > 0.60)    return { bg: 'bg-red-950',     border: 'border-red-700',  label: 'SPIKE ALERT',    labelColor: 'text-red-400',  icon: '⚡' }
-  if (prob > 0.30)    return { bg: 'bg-yellow-950',  border: 'border-yellow-700', label: 'ELEVATED RISK', labelColor: 'text-yellow-400', icon: '⚠' }
-  return               { bg: 'bg-green-950',    border: 'border-green-800', label: 'MARKET NORMAL',  labelColor: 'text-green-400', icon: '✓' }
+  if (prob === null) return { bg: 'bg-zinc-900',  border: 'border-zinc-700',  label: 'STANDBY',       labelColor: 'text-zinc-400',  icon: '◌' }
+  if (prob > 0.60)  return { bg: 'bg-red-950',    border: 'border-red-700',   label: 'SPIKE ALERT',   labelColor: 'text-red-400',   icon: '⚡' }
+  if (prob > 0.30)  return { bg: 'bg-yellow-950', border: 'border-yellow-700', label: 'ELEVATED RISK', labelColor: 'text-yellow-400', icon: '⚠' }
+  return                   { bg: 'bg-green-950',  border: 'border-green-800', label: 'MARKET NORMAL', labelColor: 'text-green-400', icon: '✓' }
 }
 
-function riskLabel(prob: number): { text: string; cls: string } {
-  if (prob > 0.60) return { text: 'Alert', cls: 'text-red-400 font-semibold' }
-  if (prob > 0.15) return { text: 'Watch', cls: 'text-yellow-400' }
-  return               { text: '',      cls: '' }
+function mptHour(iso: string): number {
+  const h = parseInt(
+    new Intl.DateTimeFormat('en-US', { timeZone: MPT, hour: '2-digit', hour12: false }).format(new Date(iso)),
+    10,
+  )
+  return h === 24 ? 0 : h
+}
+
+const PERIODS = [
+  { name: 'Overnight', label: '10pm - 6am', hours: [22, 23, 0, 1, 2, 3, 4, 5] },
+  { name: 'Morning',   label: '6am - 12pm', hours: [6, 7, 8, 9, 10, 11] },
+  { name: 'Afternoon', label: '12pm - 5pm', hours: [12, 13, 14, 15, 16] },
+  { name: 'Evening',   label: '5pm - 10pm', hours: [17, 18, 19, 20, 21] },
+]
+
+function periodRisk(maxQ99: number): {
+  level: string; dot: string; levelCls: string; cardBorder: string
+} {
+  if (maxQ99 >= 700) return { level: 'ALERT',    dot: 'bg-red-500',    levelCls: 'text-red-400',    cardBorder: 'border-red-900/60' }
+  if (maxQ99 >= 400) return { level: 'ELEVATED', dot: 'bg-orange-500', levelCls: 'text-orange-400', cardBorder: 'border-orange-900/60' }
+  if (maxQ99 >= 200) return { level: 'MODERATE', dot: 'bg-yellow-500', levelCls: 'text-yellow-400', cardBorder: 'border-yellow-900/60' }
+  return                   { level: 'LOW',      dot: 'bg-green-500',  levelCls: 'text-green-400',  cardBorder: 'border-zinc-800' }
+}
+
+function hourRiskIcon(q99: number): { icon: string; cls: string } {
+  if (q99 >= 700) return { icon: '⚡', cls: 'text-red-400' }
+  if (q99 >= 200) return { icon: '⚠',  cls: 'text-yellow-400' }
+  return                 { icon: '--', cls: 'text-zinc-700' }
 }
 
 function accuracyResult(absError: number): { symbol: string; cls: string } {
   if (absError < 30) return { symbol: '✓', cls: 'text-green-400' }
   if (absError < 60) return { symbol: '~', cls: 'text-yellow-400' }
-  return                { symbol: '✗', cls: 'text-red-400' }
+  return                    { symbol: '✗', cls: 'text-red-400' }
 }
 
 function missingHours(rows: PredictionRow[]): number {
@@ -143,7 +165,7 @@ export default async function Home() {
 
   const hiddenCount = missingHours(forecast24h)
 
-  const prob1h  = alert1h?.spike_prob_1h  ?? null
+  const prob1h  = alert1h?.spike_prob_1h      ?? null
   const price1h = alert1h?.predicted_price_1h ?? null
   const band    = alertBand(price1h !== null ? prob1h : null)
 
@@ -151,7 +173,22 @@ export default async function Home() {
     ? recentRows.reduce((sum, r) => sum + Math.abs(((r.q50 ?? r.predicted_price) ?? 0) - (r.actual_price ?? 0)), 0) / recentRows.length
     : null
 
-  const lastUpdated = alert1h?.predicted_at ?? forecast24h[0]?.predicted_at ?? null
+  const lastUpdated = alert1h?.predicted_at ?? null
+
+  // Build period data
+  const periodData = PERIODS.map(period => {
+    const rows = forecast24h.filter(r => period.hours.includes(mptHour(r.target_hour)))
+    if (rows.length === 0) return { ...period, empty: true, minQ50: 0, maxQ50: 0, maxQ99: 0 }
+    const q50vals = rows.map(r => r.q50 ?? r.predicted_price ?? 0)
+    const q99vals = rows.map(r => r.q99 ?? 0)
+    return {
+      ...period,
+      empty: false,
+      minQ50: Math.min(...q50vals),
+      maxQ50: Math.max(...q50vals),
+      maxQ99: Math.max(...q99vals),
+    }
+  })
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-gray-200 font-mono">
@@ -163,7 +200,7 @@ export default async function Home() {
             Alberta Grid Intelligence
           </h1>
           <p className="text-zinc-500 text-xs mt-1">
-            AESO pool price forecast &mdash; probabilistic quantile model (Q10/Q50/Q90/Q99)
+            AESO pool price forecast &mdash; probabilistic model
           </p>
         </div>
 
@@ -208,13 +245,11 @@ export default async function Home() {
           </div>
         </section>
 
-        {/* ── SECTION 2: TODAY'S FORECAST ── */}
+        {/* ── SECTION 2: PERIOD SUMMARY ── */}
         <section>
-          <div className="flex items-baseline justify-between mb-2">
-            <p className="text-xs text-zinc-500 uppercase tracking-widest">
-              Today&apos;s Forecast
-            </p>
-            <p className="text-xs text-zinc-600">Made at 1:00 AM MST &mdash; full day forecast</p>
+          <div className="flex items-baseline justify-between mb-3">
+            <p className="text-xs text-zinc-500 uppercase tracking-widest">Period Summary</p>
+            <p className="text-xs text-zinc-600">Today&apos;s outlook</p>
           </div>
 
           {forecast24h.length === 0 ? (
@@ -223,72 +258,96 @@ export default async function Home() {
             </div>
           ) : (
             <>
+              <div className="grid grid-cols-2 gap-3">
+                {periodData.map(p => {
+                  if (p.empty) return (
+                    <div key={p.name} className="border border-zinc-800 rounded-sm p-4 bg-[#0f0f0f]">
+                      <div className="text-xs text-zinc-400 uppercase tracking-wide font-semibold">{p.name}</div>
+                      <div className="text-xs text-zinc-600 mb-2">{p.label}</div>
+                      <div className="text-zinc-700 text-xs">No data</div>
+                    </div>
+                  )
+                  const risk = periodRisk(p.maxQ99)
+                  const showWarning = p.maxQ99 >= 400
+                  return (
+                    <div key={p.name} className={`border ${risk.cardBorder} rounded-sm p-4 bg-[#0f0f0f]`}>
+                      <div className="text-xs text-zinc-400 uppercase tracking-wide font-semibold">{p.name}</div>
+                      <div className="text-xs text-zinc-600 mb-3">{p.label}</div>
+                      <div className="text-white font-bold text-xl mb-2">
+                        ~${Math.round(p.minQ50)} &ndash; ${Math.round(p.maxQ50)}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${risk.dot}`} />
+                        <span className={`text-xs font-semibold tracking-wide ${risk.levelCls}`}>{risk.level}</span>
+                      </div>
+                      {showWarning && (
+                        <div className={`text-xs mt-1.5 ${risk.levelCls}`}>
+                          Could reach ${Math.round(p.maxQ99)}+
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
               {hiddenCount > 0 && (
-                <p className="text-zinc-700 text-xs mb-2">
+                <p className="text-zinc-700 text-xs mt-2">
                   {hiddenCount} hour{hiddenCount !== 1 ? 's' : ''} missing (data not yet published)
                 </p>
               )}
-              <div className="border border-zinc-800 overflow-x-auto rounded-sm">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="bg-[#111] border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
-                      <th className="text-left px-4 py-2.5 font-medium whitespace-nowrap">Hour (MPT)</th>
-                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q10</th>
-                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q50</th>
-                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q90</th>
-                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Q99</th>
-                      <th className="text-right px-3 py-2.5 font-medium whitespace-nowrap">Spread</th>
-                      <th className="text-center px-3 py-2.5 font-medium whitespace-nowrap">Flag</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {forecast24h.map((row, i) => {
-                      const q10    = row.q10 ?? row.predicted_price ?? 0
-                      const q50    = row.q50 ?? row.predicted_price ?? 0
-                      const q90    = row.q90 ?? 0
-                      const q99    = row.q99 ?? 0
-                      const spread = row.spread ?? (q90 - q10)
-                      const tail   = q99 > 400
-                      return (
-                        <tr
-                          key={row.id}
-                          className={`border-b border-zinc-900 ${tail ? 'bg-red-950/20' : i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
-                        >
-                          <td className="px-4 py-2.5 text-zinc-300 whitespace-nowrap">
-                            {fmtHourMPT(row.target_hour)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right text-zinc-500 whitespace-nowrap text-xs">
-                            ${q10.toFixed(0)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right text-white font-semibold whitespace-nowrap">
-                            ${q50.toFixed(0)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right text-zinc-300 whitespace-nowrap">
-                            ${q90.toFixed(0)}
-                          </td>
-                          <td className={`px-3 py-2.5 text-right whitespace-nowrap font-semibold ${tail ? 'text-red-400' : 'text-zinc-400'}`}>
-                            ${q99.toFixed(0)}
-                          </td>
-                          <td className="px-3 py-2.5 text-right text-zinc-600 whitespace-nowrap text-xs">
-                            ${spread.toFixed(0)}
-                          </td>
-                          <td className="px-3 py-2.5 text-center whitespace-nowrap text-xs">
-                            {tail
-                              ? <span className="text-red-400 font-semibold">TAIL RISK</span>
-                              : <span className="text-zinc-800">&mdash;</span>
-                            }
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
             </>
           )}
         </section>
 
-        {/* ── SECTION 3: RECENT ACCURACY ── */}
+        {/* ── SECTION 3: HOURLY DETAIL ── */}
+        <section>
+          <div className="flex items-baseline justify-between mb-2">
+            <p className="text-xs text-zinc-500 uppercase tracking-widest">Hourly Detail</p>
+            <p className="text-xs text-zinc-600">Made at 1:00 AM MST</p>
+          </div>
+
+          {forecast24h.length === 0 ? (
+            <div className="border border-zinc-800 p-4 text-zinc-600 text-sm">
+              No forecast for today.
+            </div>
+          ) : (
+            <div className="border border-zinc-800 overflow-x-auto rounded-sm">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-[#111] border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
+                    <th className="text-left px-4 py-2 font-medium">Hour (MPT)</th>
+                    <th className="text-right px-4 py-2 font-medium">Forecast</th>
+                    <th className="text-center px-4 py-2 font-medium">Risk</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {forecast24h.map((row, i) => {
+                    const q50  = row.q50 ?? row.predicted_price ?? 0
+                    const q99  = row.q99 ?? 0
+                    const icon = hourRiskIcon(q99)
+                    return (
+                      <tr
+                        key={row.id}
+                        className={`border-b border-zinc-900 ${i % 2 === 0 ? 'bg-[#0a0a0a]' : 'bg-[#0f0f0f]'}`}
+                      >
+                        <td className="px-4 py-2.5 text-zinc-400 whitespace-nowrap">
+                          {fmtHourMPT(row.target_hour)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-white font-semibold whitespace-nowrap">
+                          ${Math.round(q50)}
+                        </td>
+                        <td className={`px-4 py-2.5 text-center font-semibold whitespace-nowrap ${icon.cls}`}>
+                          {icon.icon}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {/* ── SECTION 4: RECENT ACCURACY ── */}
         <section>
           <div className="flex items-baseline justify-between mb-2">
             <p className="text-xs text-zinc-500 uppercase tracking-widest">Recent Accuracy</p>
@@ -318,11 +377,11 @@ export default async function Home() {
                 </thead>
                 <tbody>
                   {recentRows.map((row, i) => {
-                    const pred  = row.predicted_price ?? 0
+                    const pred   = (row.q50 ?? row.predicted_price) ?? 0
                     const actual = row.actual_price ?? 0
-                    const err   = pred - actual
-                    const abs   = Math.abs(err)
-                    const res   = accuracyResult(abs)
+                    const err    = pred - actual
+                    const abs    = Math.abs(err)
+                    const res    = accuracyResult(abs)
                     return (
                       <tr
                         key={row.id}
@@ -352,14 +411,14 @@ export default async function Home() {
           )}
         </section>
 
-        {/* ── SECTION 4: SYSTEM STATUS ── */}
-        <section className="border-t border-zinc-800 pt-5 space-y-1">
+        {/* ── SECTION 5: SYSTEM STATUS ── */}
+        <section className="border-t border-zinc-800 pt-5">
           <p className="text-xs text-zinc-500 uppercase tracking-widest mb-3">System Status</p>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
             <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
               <div className="text-zinc-600 mb-1">Last updated</div>
               <div className="text-zinc-300">
-                {lastUpdated ? fmtUpdated(lastUpdated) : '—'}
+                {lastUpdated ? fmtUpdated(lastUpdated) : '--'}
               </div>
             </div>
             <div className="bg-[#111] border border-zinc-800 rounded-sm p-3">
