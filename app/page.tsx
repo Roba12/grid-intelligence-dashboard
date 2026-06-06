@@ -59,11 +59,15 @@ function fmtUpdated(iso: string): string {
 // ── Data fetches ──────────────────────────────────────────────────────────────
 
 async function get1hAlert(): Promise<PredictionRow | null> {
+  // Query for the next upcoming hour — gte(target_hour, now) so we never
+  // show a stale past-hour prediction when the pipeline hasn't run recently.
+  const now = new Date().toISOString()
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
     .select('id, predicted_at, target_hour, predicted_price_1h, spike_prob_1h')
     .eq('forecast_type', '1h')
-    .order('predicted_at', { ascending: false })
+    .gte('target_hour', now)
+    .order('target_hour', { ascending: true })
     .limit(1)
   if (error) throw new Error(error.message)
   return ((data ?? []) as unknown as PredictionRow[])[0] ?? null
@@ -129,19 +133,22 @@ const PERIODS = [
   { name: 'Evening',   label: '5pm - 10pm', hours: [17, 18, 19, 20, 21] },
 ]
 
+// Thresholds derived from historical data:
+// Q99 > 700 preceded May 27 $960-989 spike (caught correctly)
+// Q99 < 700 on all non-spike days in June 2026
+// Self-calibrating: update these thresholds after each monthly retrain
 function periodRisk(maxQ99: number): {
-  level: string; dot: string; levelCls: string; cardBorder: string
+  level: 'ALERT' | 'WATCH' | 'NORMAL'; cardBorder: string
 } {
-  if (maxQ99 >= 700) return { level: 'ALERT',    dot: 'bg-red-500',    levelCls: 'text-red-400',    cardBorder: 'border-red-900/60' }
-  if (maxQ99 >= 400) return { level: 'ELEVATED', dot: 'bg-orange-500', levelCls: 'text-orange-400', cardBorder: 'border-orange-900/60' }
-  if (maxQ99 >= 200) return { level: 'MODERATE', dot: 'bg-yellow-500', levelCls: 'text-yellow-400', cardBorder: 'border-yellow-900/60' }
-  return                   { level: 'LOW',      dot: 'bg-green-500',  levelCls: 'text-green-400',  cardBorder: 'border-zinc-800' }
+  if (maxQ99 >= 700) return { level: 'ALERT',  cardBorder: 'border-red-900/60' }
+  if (maxQ99 >= 500) return { level: 'WATCH',  cardBorder: 'border-yellow-900/40' }
+  return                   { level: 'NORMAL', cardBorder: 'border-zinc-800' }
 }
 
 function hourRiskIcon(q99: number): { icon: string; cls: string } {
   if (q99 >= 700) return { icon: '⚡', cls: 'text-red-400' }
-  if (q99 >= 200) return { icon: '⚠',  cls: 'text-yellow-400' }
-  return                 { icon: '--', cls: 'text-zinc-700' }
+  if (q99 >= 500) return { icon: '⚠',  cls: 'text-yellow-400' }
+  return                 { icon: '',   cls: 'text-zinc-700' }
 }
 
 function accuracyResult(absError: number): { symbol: string; cls: string } {
@@ -268,7 +275,6 @@ export default async function Home() {
                     </div>
                   )
                   const risk = periodRisk(p.maxQ99)
-                  const showWarning = p.maxQ99 >= 400
                   return (
                     <div key={p.name} className={`border ${risk.cardBorder} rounded-sm p-4 bg-[#0f0f0f]`}>
                       <div className="text-xs text-zinc-400 uppercase tracking-wide font-semibold">{p.name}</div>
@@ -276,14 +282,16 @@ export default async function Home() {
                       <div className="text-white font-bold text-xl mb-2">
                         ~${Math.round(p.minQ50)} &ndash; ${Math.round(p.maxQ50)}
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${risk.dot}`} />
-                        <span className={`text-xs font-semibold tracking-wide ${risk.levelCls}`}>{risk.level}</span>
-                      </div>
-                      {showWarning && (
-                        <div className={`text-xs mt-1.5 ${risk.levelCls}`}>
-                          Could reach ${Math.round(p.maxQ99)}+
-                        </div>
+                      {risk.level === 'ALERT' && (
+                        <>
+                          <div className="text-xs font-semibold text-red-400">{'⚡'} Alert</div>
+                          <div className="text-xs mt-1 text-red-400">
+                            Could reach ${Math.round(p.maxQ99)}+
+                          </div>
+                        </>
+                      )}
+                      {risk.level === 'WATCH' && (
+                        <div className="text-xs font-semibold text-yellow-400">{'⚠'} Watch</div>
                       )}
                     </div>
                   )
