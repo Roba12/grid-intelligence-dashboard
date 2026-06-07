@@ -86,6 +86,16 @@ async function get24hForecast(): Promise<PredictionRow[]> {
   return (data ?? []) as unknown as PredictionRow[]
 }
 
+async function getLastUpdated(): Promise<string | null> {
+  const { data, error } = await createSupabaseClient()
+    .from('prediction_log')
+    .select('predicted_at')
+    .order('predicted_at', { ascending: false })
+    .limit(1)
+  if (error || !data || data.length === 0) return null
+  return (data[0] as { predicted_at: string }).predicted_at
+}
+
 async function getRecentAccuracy(): Promise<PredictionRow[]> {
   const { data, error } = await createSupabaseClient()
     .from('prediction_log')
@@ -164,10 +174,11 @@ function missingHours(rows: PredictionRow[]): number {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function Home() {
-  const [alert1h, forecast24h, recentRows] = await Promise.all([
+  const [alert1h, forecast24h, recentRows, lastUpdated] = await Promise.all([
     get1hAlert(),
     get24hForecast(),
     getRecentAccuracy(),
+    getLastUpdated(),
   ])
 
   const hiddenCount = missingHours(forecast24h)
@@ -179,8 +190,6 @@ export default async function Home() {
   const mae = recentRows.length > 0
     ? recentRows.reduce((sum, r) => sum + Math.abs(((r.q50 ?? r.predicted_price) ?? 0) - (r.actual_price ?? 0)), 0) / recentRows.length
     : null
-
-  const lastUpdated = alert1h?.predicted_at ?? null
 
   // Build period data
   const periodData = PERIODS.map(period => {
